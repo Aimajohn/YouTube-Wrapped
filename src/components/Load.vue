@@ -3,12 +3,7 @@
     <div id="content" ref="content">
       <TextInput id="apikey" ref="key" prompt="Google API Key" @input="loadkey" />
       <FileInputButton ref="button" :apikey="apikey" @empty="flashkey" @load="getInfo" />
-      <a
-        ref="help"
-        href="https://github.com/Sank6/YouTube-Wrapped/wiki"
-        target="_blank"
-        >help?</a
-      >
+      <a ref="help" href="https://github.com/Sank6/YouTube-Wrapped/wiki" target="_blank">help?</a>
       <FillingUp ref="water" :colour="colour" />
       <Stats ref="stats" id="stats" v-bind="stats" />
       <ErrorComponent ref="error" v-bind="error" />
@@ -35,6 +30,31 @@ interface IEntry {
   activityControls: string[];
 }
 
+
+
+interface IResponse {
+  kind: string;
+  etag: string;
+  nextPageToken: string;
+  prevPageToken: string;
+  pageInfo: {
+    totalResults: number;
+    resultsPerPage: number
+  };
+  items: {
+    kind: "youtube#video";
+    snippet: {
+      channelId: string;
+      title: string;
+      tags: string[];
+      channelTitle: string;
+    }
+    contentDetails: {
+      duration: string;
+    }
+  }[]
+}
+
 export default defineComponent({
   name: 'Load',
   data() {
@@ -46,8 +66,8 @@ export default defineComponent({
         year: 0,
         videosWatched: 0,
         secondsWatched: 0,
-        mostWatched: [] as unknown[],
-        mostTags: [] as { tag: string; count: number;}[],
+        mostWatched: [] as { name: string; videos: number; minutes: number; url: string; }[],
+        mostTags: [] as { tag: string; count: number }[],
       },
       error: {
         name: '',
@@ -92,6 +112,14 @@ export default defineComponent({
       return 0;
     },
     async getInfo(stringData: string, json: boolean) {
+
+      // Debug Information
+      let debugMatches = -1;
+      let debugMatchesThisYear = -1;
+      let debugNumChunks = -1;
+      let debugRequests = -1;
+
+
       try {
         const d = new Date();
         const yearOfWrapped = d.getMonth() === 0 ? d.getFullYear() - 1 : d.getFullYear();
@@ -118,16 +146,29 @@ export default defineComponent({
             urls.push(url);
           }
         } else {
-          const regexp = /<a href="https:\/\/www\.youtube\.com\/watch\?v=(.+?)".+?<\/a><br>.+?<\/a><br>(.+?GMT)<\/div>/g;
-          let matches: [string, Date][] = [...stringData.matchAll(regexp)]
-            .map((match) => [match[1], new Date(match[2])]);
+          const videoIdRegex = /Watched <a href="https:\/\/www\.youtube\.com\/watch\?v=([a-zA-Z0-9_-]+)/g;
+          const dateRegex = /<\/a><br>([a-zA-Z]{3} \d{1,2}, \d{4}, \d{1,2}:\d{1,2}:\d{1,2}\s(?:AM|PM) [a-zA-Z]{3})<\/div>/g;
+          const videoIdMatches = [...stringData.matchAll(videoIdRegex)].map(
+            (match) => match[1],
+          );
+          const dateMatches = [...stringData.matchAll(dateRegex)].map(
+            (match) => new Date(match[1]),
+          );
+          let matches: [string, Date][] = dateMatches.map((element, index) => [
+            videoIdMatches[index],
+            element,
+          ]);
+
+          debugMatches = matches.length;
           matches = matches.filter(([, date]) => date >= beginningOfYear);
+          debugMatchesThisYear = matches.length;
           const chunks = matches.reduce((acc, entry, index) => {
             const chunkIndex = Math.floor(index / 50);
             if (!acc[chunkIndex]) acc[chunkIndex] = [];
             acc[chunkIndex].push(entry);
             return acc;
           }, [] as Array<[string, Date][]>);
+          debugNumChunks = chunks.length;
           for (const chunk of chunks) {
             const entryIDs = chunk.map((content) => content[0]);
             const url = `https://youtube.googleapis.com/youtube/v3/videos?part=snippet%2CcontentDetails%2Cstatistics&id=${entryIDs.join(
@@ -144,9 +185,9 @@ export default defineComponent({
           return acc;
         }, [] as string[][]);
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let responses: AxiosResponse<any, any>[] = [];
+        let responses: AxiosResponse<IResponse>[] = [];
         let index = 0;
+        debugRequests = 0;
         for (const urlChunk of urlChunks) {
           const temp = await Promise.all(
             urlChunk.map((url) => axios.get(url, { responseType: 'json' })),
@@ -156,6 +197,7 @@ export default defineComponent({
           const water = this.$refs.water as typeof FillingUp;
           water.fill(Math.floor((index / urlChunks.length) * 100) + 5);
         }
+        debugRequests = urlChunks.length;
 
         const channels: { [key: string]: [number, number, string] } = {}; // { channel: [videos, seconds, url] }
         const tags: { [key: string]: number } = {}; // { tag: videos }
@@ -164,7 +206,7 @@ export default defineComponent({
             data: { items },
           } = response;
           for (const item of items) {
-            if (item.kind === 'youtube#video') this.stats.videosWatched += 1;
+            this.stats.videosWatched += 1;
             if (item.snippet.tags) {
               for (const tag of item.snippet.tags.slice(0, 5)) {
                 if (!Object.prototype.hasOwnProperty.call(tags, tag)) tags[tag] = 1;
@@ -177,11 +219,22 @@ export default defineComponent({
             if (Object.hasOwnProperty.call(channels, item.snippet.channelTitle)) {
               channels[item.snippet.channelTitle][0] += 1;
               channels[item.snippet.channelTitle][1] += duration;
-            } else channels[item.snippet.channelTitle] = [1, duration, `https://www.youtube.com/channel/${item.snippet.channelId}`];
+            } else {
+              channels[item.snippet.channelTitle] = [
+                1,
+                duration,
+                `https://www.youtube.com/channel/${item.snippet.channelId}`,
+              ];
+            }
           }
         }
 
-        if (this.stats.videosWatched === 0) throw new Error('Invalid watch-history.json. No videos found.');
+        if (this.stats.videosWatched === 0) {
+          if (!json) {
+            throw new Error('Invalid watch-history.html. No videos found.');
+          }
+          throw new Error('Invalid watch-history.json. No videos found.');
+        }
 
         let mostWatched = Object.entries(channels).sort((a, b) => b[1][0] - a[1][0]);
         mostWatched = mostWatched.slice(0, 5);
@@ -214,6 +267,15 @@ export default defineComponent({
         stats.show();
       } catch (error) {
         console.error(error);
+        console.log("--------------");
+        console.log("Debug Information");
+        console.log(`Matches: ${debugMatches}`);
+        console.log(`Matches this year: ${debugMatchesThisYear}`);
+        console.log(`Number of chunks: ${debugNumChunks}`);
+        console.log(`Number of requests: ${debugRequests}`);
+        console.log(`Stats: ${JSON.stringify(this.stats)}`);
+        console.log("--------------");
+
         const water = this.$refs.water as typeof FillingUp;
         this.colour = '#FF0000';
         water.fill(105);
